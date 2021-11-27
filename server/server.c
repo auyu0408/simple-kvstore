@@ -7,11 +7,146 @@
 #include <netdb.h>
 #include <ctype.h>
 
+#include <signal.h>
 #include "types.h"
 #include "sock.h"
 
-void *thread_routine(void*);
-pthread_rwlock_t rw_lock = PTHREAD_RWLOCK_INITIALIZER;
+pthread_rwlock_t rw_lock = PTHREAD_RWLOCK_INITIALIZER;//to prevent race condition
+
+/*
+thread_server()
+get socket server input
+
+argument:
+parm: listenfd in socket
+
+return:
+if get "EXIT", leave process
+*/
+void *thread_server(void* parm)
+{
+    pthread_detach(pthread_self());
+    int fd = (int) parm;
+    char str[50];
+    while(scanf("%[^\n]%*c", str))
+    {
+        if(strcmp(str,"EXIT") == 0)
+            break;
+    }
+    shutdown(fd, SHUT_RDWR);
+    close(fd);
+    exit(0);
+}
+
+/*
+thread_routine()
+thread routine after thread create
+
+argument:
+param: fd, used for socket communication
+
+return:
+pthread_exit(0): exit thread in disjoin status
+*/
+void *thread_routine(void* param)
+{
+    int fd = *(int *) param;//for socket communication
+    char recvbuf[300];//receieve msg from socket
+    char sendbuf[300];//save msg would be send
+    char *com_temp;//command temporary
+    char *key_temp;//key temporary
+    char *val_temp;//value temporary
+    char val[100];
+    char* d = " ";//split string
+    FILE* file;//file pointer
+    char filename[105];//filename temporary
+
+    printf("[THREAD INFO] Thread %ld created, serving connection fd %d.\n", pthread_self(), fd);//print thread info
+    pthread_detach(pthread_self());//make thread disjoint
+    //start receieve command
+    while(recv(fd, recvbuf, 300, 0))
+    {
+        //separate command, key for all recv
+        com_temp = strtok(recvbuf, d);
+        key_temp = strtok(NULL, d);
+        sprintf(filename, "%s.txt", key_temp);//create filename
+        /*
+        compare command and execute it
+
+        SET: get value and build data
+        GET: open data and send value
+        DELETE: delete data
+        EXIT: leave the loop and exit thread
+        */
+        if(strcmp(com_temp, "SET") == 0)
+        {
+            val_temp = strtok(NULL, d);
+            //when a thread write, other thread can't read and write
+            pthread_rwlock_wrlock(&rw_lock);
+            if(access(filename, 0) == 0)
+            {
+                //prepare error message
+                pthread_rwlock_unlock(&rw_lock);
+                sprintf(sendbuf, "Key is already exist!");
+            }
+            else
+            {
+                //build file and prepare send message
+                file = fopen(filename, "w");
+                fprintf(file, "%s", val_temp);
+                fclose(file);
+                pthread_rwlock_unlock(&rw_lock);
+                sprintf(sendbuf, "[OK] Key value pair (%s, %s) is stored!", key_temp, val_temp);
+            }
+            send(fd, sendbuf, strlen(sendbuf)+1, 0);//send message
+        }
+        else if(strcmp(com_temp, "GET") == 0)
+        {
+            pthread_rwlock_rdlock(&rw_lock);
+            if(access(filename, 0) == 0)
+            {
+                //open file to get value and prepare send msg
+                file = fopen(filename, "r");
+                fread(val, 100, 1, file);
+                fclose(file);
+                pthread_rwlock_unlock(&rw_lock);
+                sprintf(sendbuf, "[OK] The value of %s is %s", key_temp, val);
+            }
+            else
+            {
+                //prepare error msg
+                pthread_rwlock_unlock(&rw_lock);
+                sprintf(sendbuf, "Can't find the key!");
+            }
+            send(fd, sendbuf, strlen(sendbuf)+1, 0);
+        }
+        else if(strcmp(com_temp, "DELETE") == 0)
+        {
+            pthread_rwlock_wrlock(&rw_lock);
+            if(access(filename, 0) == 0)
+            {
+                //remove file and prepare msg
+                remove(filename);
+                pthread_rwlock_unlock(&rw_lock);
+                sprintf(sendbuf,"[OK] Key \"%s\" is removed!", key_temp);
+            }
+            else
+            {
+                //prepare msg
+                sprintf(sendbuf, "Can't find key!");
+                pthread_rwlock_unlock(&rw_lock);
+            }
+            send(fd, sendbuf, strlen(sendbuf)+1, 0);
+        }
+        else if(strcmp(com_temp, "EXIT") == 0)
+            break;
+        else if(strcmp(com_temp, "KEEP") == 0)
+            continue;
+    }
+    //shutdown(fd, SHUT_RDWR);
+    //close(fd);
+    pthread_exit(0);
+}
 
 int main(int argc, char **argv)
 {
@@ -42,111 +177,35 @@ int main(int argc, char **argv)
     /* Open a listen socket fd */
     int listenfd __attribute__((unused)) = open_listenfd(server_port);
     /* Start coding your server code here! */
-    int* connfd;
-    pthread_t tid;
-    char recv_buf[100];
-    printf("[INFO] Start with a clean database...\n");
+    int* connfd;//connect fd for socket communication
+    pthread_t tid;//thread id to create
+    char recv_buf[50];//recv client pid
+
+    //print server info
+    printf("[INFO] Start with a database...\n");
     printf("[INFO] Initializing the server...\n");
     printf("[INFO] Server Initialized!\n");
+
+    pthread_create(&tid, NULL, thread_server, (void *) listenfd);
+
+    //accept client
     while(1)
     {
-        connfd = malloc(sizeof(int));
+        connfd = malloc(sizeof(int));//each tread have different connfd
+        //print already msg
         printf("[INFO] Listening on the port %s...\n", server_port);
+        //if connection failed, print error
         if((*connfd = accept(listenfd, NULL, NULL)) == -1)
         {
-            printf("accept socket error");//print error
+            printf("accept socket error");
             free(connfd);
             continue;
         }
-        //print connected
-        recv(*connfd, recv_buf, 100, 0);
+        //connection success, print client pid and create thread
+        recv(*connfd, recv_buf, 50, 0);
         printf("[CLIENT CONNECTED] Connected to client (localhost, %s)\n", recv_buf);
         pthread_create(&tid, NULL, thread_routine, (void *)connfd);
     }
     close(listenfd);
     return 0;
-}
-
-void *thread_routine(void* param)
-{
-    int fd = *(int *) param;
-    printf("[THREAD INFO] Thread %ld created, serving connection fd %d.\n", pthread_self(), fd);
-    char recvbuf[300];
-    char sendbuf[300];
-    char *com_temp;
-    char *key_temp;
-    char *val_temp;
-    char* d = " ";
-    int n=0;
-    FILE* file;
-    pthread_detach(pthread_self());
-    while(1)
-    {
-        n = recv(fd, recvbuf, 300, 0);
-        if(n > 0)
-        {
-            com_temp = strtok(recvbuf, d);
-            if(strcmp(com_temp, "SET") == 0)
-            {
-                key_temp = strtok(NULL, d);
-                val_temp = strtok(NULL, d);
-                pthread_rwlock_wrlock(&rw_lock);
-                if(access(key_temp, 0) == 0)
-                {
-                    sprintf(sendbuf, "Key is already exist!");
-                    pthread_rwlock_unlock(&rw_lock);
-                }
-                else
-                {
-                    file = fopen(key_temp, "w");
-                    fwrite(val_temp, 1, sizeof(val_temp), file);
-                    fclose(file);
-                    pthread_rwlock_unlock(&rw_lock);
-                    sprintf(sendbuf, "[OK] Key value pair (%s, %s) is stored!", key_temp, val_temp);
-                }
-                send(fd, sendbuf, strlen(sendbuf)+1, 0);
-            }
-            else if(strcmp(com_temp, "GET") == 0)
-            {
-                key_temp = strtok(NULL, d);
-                pthread_rwlock_rdlock(&rw_lock);
-                if(access(key_temp, 0) == 0)
-                {
-                    file = fopen(key_temp, "r");
-                    fread(val_temp, 101, sizeof(char), file);
-                    fclose(file);
-                    pthread_rwlock_unlock(&rw_lock);
-                    sprintf(sendbuf, "[OK] The value of %s is %s", key_temp, val_temp);
-                }
-                else
-                {
-                    pthread_rwlock_unlock(&rw_lock);
-                    sprintf(sendbuf, "Can't find the key!");
-                }
-                send(fd, sendbuf, strlen(sendbuf)+1, 0);
-            }
-            else if(strcmp(com_temp, "DELETE") == 0)
-            {
-                key_temp = strtok(NULL, d);
-                pthread_rwlock_wrlock(&rw_lock);
-                if(access(key_temp, 0) == 0)
-                {
-                    remove(key_temp);
-                    pthread_rwlock_unlock(&rw_lock);
-                    sprintf(sendbuf,"[OK] Key \"%s\" is removed!", key_temp);
-                }
-                else
-                {
-                    sprintf(sendbuf, "Can't find key!");
-                    pthread_rwlock_unlock(&rw_lock);
-                }
-                send(fd, sendbuf, strlen(sendbuf)+1, 0);
-            }
-            else if(strcmp(com_temp, "EXIT") == 0)
-                break;
-        }
-    }
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
-    pthread_exit(0);
 }
