@@ -56,7 +56,7 @@ void *thread_routine(void* param)
     char *com_temp;//command temporary
     char *key_temp;//key temporary
     char *val_temp;//value temporary
-    char val[100];
+    char val[105];//value temp use at "GET"
     char* d = " ";//split string
     FILE* file;//file pointer
     char filename[105];//filename temporary
@@ -107,7 +107,7 @@ void *thread_routine(void* param)
             {
                 //open file to get value and prepare send msg
                 file = fopen(filename, "r");
-                fread(val, 100, 1, file);
+                fread(val, 101, 1, file);
                 fclose(file);
                 pthread_rwlock_unlock(&rw_lock);
                 sprintf(sendbuf, "[OK] The value of %s is %s", key_temp, val);
